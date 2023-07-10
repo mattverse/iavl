@@ -17,11 +17,12 @@ type traversal struct {
 	inclusive    bool          // end key inclusiveness
 	post         bool          // postorder traversal
 	delayedNodes *delayedNodes // delayed nodes to be traversed
+	unlocked     bool          // whether traversal should not lock tree's mutex
 }
 
 var errIteratorNilTreeGiven = errors.New("iterator must be created with an immutable tree but the tree was nil")
 
-func (node *Node) newTraversal(tree *ImmutableTree, start, end []byte, ascending bool, inclusive bool, post bool) *traversal {
+func (node *Node) newTraversal(tree *ImmutableTree, start, end []byte, ascending bool, inclusive bool, post bool, unlocked bool) *traversal {
 	return &traversal{
 		tree:         tree,
 		start:        start,
@@ -30,6 +31,7 @@ func (node *Node) newTraversal(tree *ImmutableTree, start, end []byte, ascending
 		inclusive:    inclusive,
 		post:         post,
 		delayedNodes: &delayedNodes{{node, true}}, // set initial traverse to the node
+		unlocked:     unlocked,
 	}
 }
 
@@ -76,37 +78,47 @@ func (nodes *delayedNodes) length() int {
 // 1. If it is not an delayed node (node.delayed == false) it immediately returns it.
 //
 // A. If the `node` is a branch node:
-// 1. If the traversal is postorder, then append the current node to the t.delayedNodes,
-//    with `delayed` set to false. This makes the current node returned *after* all the children
-//    are traversed, without being expanded.
-// 2. Append the traversable children nodes into the `delayedNodes`, with `delayed` set to true. This
-//    makes the children nodes to be traversed, and expanded with their respective children.
-// 3. If the traversal is preorder, (with the children to be traversed already pushed to the
-//    `delayedNodes`), returns the current node.
-// 4. Call `traversal.next()` to further traverse through the `delayedNodes`.
+//  1. If the traversal is postorder, then append the current node to the t.delayedNodes,
+//     with `delayed` set to false. This makes the current node returned *after* all the children
+//     are traversed, without being expanded.
+//  2. Append the traversable children nodes into the `delayedNodes`, with `delayed` set to true. This
+//     makes the children nodes to be traversed, and expanded with their respective children.
+//  3. If the traversal is preorder, (with the children to be traversed already pushed to the
+//     `delayedNodes`), returns the current node.
+//  4. Call `traversal.next()` to further traverse through the `delayedNodes`.
 //
 // B. If the `node` is a leaf node, it will be returned without expand, by the following process:
-// 1. If the traversal is postorder, the current node will be append to the `delayedNodes` with `delayed`
-//    set to false, and immediately returned at the subsequent call of `traversal.next()` at the last line.
-// 2. If the traversal is preorder, the current node will be returned.
+//  1. If the traversal is postorder, the current node will be append to the `delayedNodes` with `delayed`
+//     set to false, and immediately returned at the subsequent call of `traversal.next()` at the last line.
+//  2. If the traversal is preorder, the current node will be returned.
 func (t *traversal) next() (*Node, error) {
+	n, err, shouldReturn := t.doNext()
+	if shouldReturn {
+		return n, err
+	}
+
+	// Keep traversing and expanding the remaning delayed nodes. A-4.
+	return t.next()
+}
+
+func (t *traversal) doNext() (*Node, error, bool) {
 	// End of traversal.
 	if t.delayedNodes.length() == 0 {
-		return nil, nil
+		return nil, nil, true
 	}
 
 	node, delayed := t.delayedNodes.pop()
 
 	// Already expanded, immediately return.
 	if !delayed || node == nil {
-		return node, nil
+		return node, nil, true
 	}
 
-	afterStart := t.start == nil || bytes.Compare(t.start, node.key) < 0
-	startOrAfter := afterStart || bytes.Equal(t.start, node.key)
-	beforeEnd := t.end == nil || bytes.Compare(node.key, t.end) < 0
+	afterStart := t.start == nil || bytes.Compare(t.start, node.GetNodeKey()) < 0
+	startOrAfter := afterStart || bytes.Equal(t.start, node.GetNodeKey())
+	beforeEnd := t.end == nil || bytes.Compare(node.GetNodeKey(), t.end) < 0
 	if t.inclusive {
-		beforeEnd = beforeEnd || bytes.Equal(node.key, t.end)
+		beforeEnd = beforeEnd || bytes.Equal(node.GetNodeKey(), t.end)
 	}
 
 	// case of postorder. A-1 and B-1
@@ -124,7 +136,7 @@ func (t *traversal) next() (*Node, error) {
 				// push the delayed traversal for the right nodes,
 				rightNode, err := node.getRightNode(t.tree)
 				if err != nil {
-					return nil, err
+					return nil, err, true
 				}
 				t.delayedNodes.push(rightNode, true)
 			}
@@ -132,7 +144,7 @@ func (t *traversal) next() (*Node, error) {
 				// push the delayed traversal for the left nodes,
 				leftNode, err := node.getLeftNode(t.tree)
 				if err != nil {
-					return nil, err
+					return nil, err, true
 				}
 				t.delayedNodes.push(leftNode, true)
 			}
@@ -143,7 +155,7 @@ func (t *traversal) next() (*Node, error) {
 				// push the delayed traversal for the left nodes,
 				leftNode, err := node.getLeftNode(t.tree)
 				if err != nil {
-					return nil, err
+					return nil, err, true
 				}
 				t.delayedNodes.push(leftNode, true)
 			}
@@ -151,7 +163,7 @@ func (t *traversal) next() (*Node, error) {
 				// push the delayed traversal for the right nodes,
 				rightNode, err := node.getRightNode(t.tree)
 				if err != nil {
-					return nil, err
+					return nil, err, true
 				}
 				t.delayedNodes.push(rightNode, true)
 			}
@@ -161,11 +173,10 @@ func (t *traversal) next() (*Node, error) {
 	// case of preorder traversal. A-3 and B-2.
 	// Process root then (recursively) processing left child, then process right child
 	if !t.post && (!node.isLeaf() || (startOrAfter && beforeEnd)) {
-		return node, nil
+		return node, nil, true
 	}
 
-	// Keep traversing and expanding the remaning delayed nodes. A-4.
-	return t.next()
+	return nil, nil, false
 }
 
 // Iterator is a dbm.Iterator for ImmutableTree
@@ -194,7 +205,24 @@ func NewIterator(start, end []byte, ascending bool, tree *ImmutableTree) dbm.Ite
 		iter.err = errIteratorNilTreeGiven
 	} else {
 		iter.valid = true
-		iter.t = tree.root.newTraversal(tree, start, end, ascending, false, false)
+		iter.t = tree.root.newTraversal(tree, start, end, ascending, false, false, false)
+		// Move iterator before the first element
+		iter.Next()
+	}
+	return iter
+}
+
+func NewIteratorUnlocked(start, end []byte, ascending bool, tree *ImmutableTree) dbm.Iterator {
+	iter := &Iterator{
+		start: start,
+		end:   end,
+	}
+
+	if tree == nil {
+		iter.err = errIteratorNilTreeGiven
+	} else {
+		iter.valid = true
+		iter.t = tree.root.newTraversal(tree, start, end, ascending, false, false, true)
 		// Move iterator before the first element
 		iter.Next()
 	}
@@ -235,8 +263,8 @@ func (iter *Iterator) Next() {
 		return
 	}
 
-	if node.height == 0 {
-		iter.key, iter.value = node.key, node.value
+	if node.GetHeight() == 0 {
+		iter.key, iter.value = node.GetNodeKey(), node.GetValue()
 		return
 	}
 
