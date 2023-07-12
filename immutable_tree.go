@@ -3,6 +3,7 @@ package iavl
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	dbm "github.com/tendermint/tm-db"
 )
@@ -18,6 +19,7 @@ type ImmutableTree struct {
 	ndb                    *nodeDB
 	version                int64
 	skipFastStorageUpgrade bool
+	mtx                    *sync.Mutex
 }
 
 // NewImmutableTree creates both in-memory and persistent instances
@@ -30,6 +32,7 @@ func NewImmutableTree(db dbm.DB, cacheSize int, skipFastStorageUpgrade bool) *Im
 		// NodeDB-backed Tree.
 		ndb:                    newNodeDB(db, cacheSize, nil),
 		skipFastStorageUpgrade: skipFastStorageUpgrade,
+		mtx:                    &sync.Mutex{},
 	}
 }
 
@@ -39,6 +42,7 @@ func NewImmutableTreeWithOpts(db dbm.DB, cacheSize int, opts *Options, skipFastS
 		// NodeDB-backed Tree.
 		ndb:                    newNodeDB(db, cacheSize, opts),
 		skipFastStorageUpgrade: skipFastStorageUpgrade,
+		mtx:                    &sync.Mutex{},
 	}
 }
 
@@ -86,12 +90,12 @@ func (t *ImmutableTree) renderNode(node *Node, indent string, depth int, encoder
 	}
 	// handle leaf
 	if node.isLeaf() {
-		here := fmt.Sprintf("%s%s", prefix, encoder(node.key, depth, true))
+		here := fmt.Sprintf("%s%s", prefix, encoder(node.GetNodeKey(), depth, true))
 		return []string{here}, nil
 	}
 
 	// recurse on inner node
-	here := fmt.Sprintf("%s%s", prefix, encoder(node.hash, depth, false))
+	here := fmt.Sprintf("%s%s", prefix, encoder(node.GetHash(), depth, false))
 
 	rightNode, err := node.getRightNode(t)
 	if err != nil {
@@ -123,7 +127,7 @@ func (t *ImmutableTree) Size() int64 {
 	if t.root == nil {
 		return 0
 	}
-	return t.root.size
+	return t.root.GetSize()
 }
 
 // Version returns the version of the tree.
@@ -136,7 +140,7 @@ func (t *ImmutableTree) Height() int8 {
 	if t.root == nil {
 		return 0
 	}
-	return t.root.height
+	return t.root.GetHeight()
 }
 
 // Has returns whether or not a key exists.
@@ -256,6 +260,7 @@ func (t *ImmutableTree) Iterator(start, end []byte, ascending bool) (dbm.Iterato
 			return NewFastIterator(start, end, ascending, t.ndb), nil
 		}
 	}
+
 	return NewIterator(start, end, ascending, t), nil
 }
 
@@ -267,8 +272,8 @@ func (t *ImmutableTree) IterateRange(start, end []byte, ascending bool, fn func(
 		return false
 	}
 	return t.root.traverseInRange(t, start, end, ascending, false, false, func(node *Node) bool {
-		if node.height == 0 {
-			return fn(node.key, node.value)
+		if node.GetHeight() == 0 {
+			return fn(node.GetNodeKey(), node.GetValue())
 		}
 		return false
 	})
@@ -282,8 +287,8 @@ func (t *ImmutableTree) IterateRangeInclusive(start, end []byte, ascending bool,
 		return false
 	}
 	return t.root.traverseInRange(t, start, end, ascending, true, false, func(node *Node) bool {
-		if node.height == 0 {
-			return fn(node.key, node.value, node.version)
+		if node.GetHeight() == 0 {
+			return fn(node.GetNodeKey(), node.GetValue(), node.GetVersion())
 		}
 		return false
 	})
@@ -317,6 +322,7 @@ func (t *ImmutableTree) clone() *ImmutableTree {
 		ndb:                    t.ndb,
 		version:                t.version,
 		skipFastStorageUpgrade: t.skipFastStorageUpgrade,
+		mtx:                    t.mtx,
 	}
 }
 
