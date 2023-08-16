@@ -237,8 +237,8 @@ func (ndb *nodeDB) SaveNode(node *Node) error {
 
 // SaveFastNode saves a FastNode to disk and add to cache.
 func (ndb *nodeDB) SaveFastNode(node *fastnode.Node) error {
-	ndb.mtx.Lock()
-	defer ndb.mtx.Unlock()
+	// ndb.mtx.Lock()
+	// defer ndb.mtx.Unlock()
 	return ndb.saveFastNodeUnlocked(node, true)
 }
 
