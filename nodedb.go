@@ -212,8 +212,8 @@ func (ndb *nodeDB) SaveNode(node *Node) error {
 
 // SaveNode saves a FastNode to disk and add to cache.
 func (ndb *nodeDB) SaveFastNode(node *FastNode) error {
-	ndb.mtx.Lock()
-	defer ndb.mtx.Unlock()
+	// ndb.mtx.Lock()
+	// defer ndb.mtx.Unlock()
 	return ndb.saveFastNodeUnlocked(node, true)
 }
 
@@ -1008,6 +1008,7 @@ func (ndb *nodeDB) orphans() ([][]byte, error) {
 // Not efficient.
 // NOTE: DB cannot implement Size() because
 // mutations are not always synchronous.
+//
 //nolint:unused
 func (ndb *nodeDB) size() int {
 	size := 0

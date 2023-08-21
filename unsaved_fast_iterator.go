@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"sort"
+	"sync"
 
 	dbm "github.com/tendermint/tm-db"
 )
@@ -31,6 +32,8 @@ type UnsavedFastIterator struct {
 	unsavedFastNodeAdditions map[string]*FastNode
 	unsavedFastNodeRemovals  map[string]interface{}
 	unsavedFastNodesToSort   []string
+
+	rwm sync.RWMutex
 }
 
 var _ dbm.Iterator = (*UnsavedFastIterator)(nil)
@@ -47,6 +50,24 @@ func NewUnsavedFastIterator(start, end []byte, ascending bool, ndb *nodeDB, unsa
 		nextVal:                  nil,
 		nextUnsavedNodeIdx:       0,
 		fastIterator:             NewFastIterator(start, end, ascending, ndb),
+	}
+
+	if iter.ndb == nil {
+		iter.err = errFastIteratorNilNdbGiven
+		iter.valid = false
+		return iter
+	}
+
+	if iter.unsavedFastNodeAdditions == nil {
+		iter.err = errUnsavedFastIteratorNilAdditionsGiven
+		iter.valid = false
+		return iter
+	}
+
+	if iter.unsavedFastNodeRemovals == nil {
+		iter.err = errUnsavedFastIteratorNilRemovalsGiven
+		iter.valid = false
+		return iter
 	}
 
 	// We need to ensure that we iterate over saved and unsaved state in order.
@@ -70,24 +91,6 @@ func NewUnsavedFastIterator(start, end []byte, ascending bool, ndb *nodeDB, unsa
 		}
 		return iter.unsavedFastNodesToSort[i] > iter.unsavedFastNodesToSort[j]
 	})
-
-	if iter.ndb == nil {
-		iter.err = errFastIteratorNilNdbGiven
-		iter.valid = false
-		return iter
-	}
-
-	if iter.unsavedFastNodeAdditions == nil {
-		iter.err = errUnsavedFastIteratorNilAdditionsGiven
-		iter.valid = false
-		return iter
-	}
-
-	if iter.unsavedFastNodeRemovals == nil {
-		iter.err = errUnsavedFastIteratorNilRemovalsGiven
-		iter.valid = false
-		return iter
-	}
 
 	// Move to the first elemenet
 	iter.Next()
@@ -133,9 +136,13 @@ func (iter *UnsavedFastIterator) Next() {
 	}
 
 	diskKeyStr := unsafeToStr(iter.fastIterator.Key())
+
+	iter.rwm.RLock() // Acquire read lock
+
 	if iter.fastIterator.Valid() && iter.nextUnsavedNodeIdx < len(iter.unsavedFastNodesToSort) {
 
 		if iter.unsavedFastNodeRemovals[diskKeyStr] != nil {
+			iter.rwm.RUnlock() // Release read lock before recursive call
 			// If next fast node from disk is to be removed, skip it.
 			iter.fastIterator.Next()
 			iter.Next()
@@ -143,7 +150,11 @@ func (iter *UnsavedFastIterator) Next() {
 		}
 
 		nextUnsavedKey := iter.unsavedFastNodesToSort[iter.nextUnsavedNodeIdx]
-		nextUnsavedNode := iter.unsavedFastNodeAdditions[nextUnsavedKey]
+		nextUnsavedNode, ok := iter.unsavedFastNodeAdditions[nextUnsavedKey]
+		if !ok {
+			iter.rwm.RUnlock() // Important: Release read lock in the case of unexpected behavior
+			return
+		}
 
 		var isUnsavedNext bool
 		if iter.ascending {
@@ -164,6 +175,7 @@ func (iter *UnsavedFastIterator) Next() {
 			iter.nextVal = nextUnsavedNode.value
 
 			iter.nextUnsavedNodeIdx++
+			iter.rwm.RUnlock() // Release read lock
 			return
 		}
 		// Disk node is next
@@ -171,12 +183,14 @@ func (iter *UnsavedFastIterator) Next() {
 		iter.nextVal = iter.fastIterator.Value()
 
 		iter.fastIterator.Next()
+		iter.rwm.RUnlock() // Release read lock
 		return
 	}
 
 	// if only nodes on disk are left, we return them
 	if iter.fastIterator.Valid() {
 		if iter.unsavedFastNodeRemovals[diskKeyStr] != nil {
+			iter.rwm.RUnlock() // Release read lock before recursive call
 			// If next fast node from disk is to be removed, skip it.
 			iter.fastIterator.Next()
 			iter.Next()
@@ -187,6 +201,7 @@ func (iter *UnsavedFastIterator) Next() {
 		iter.nextVal = iter.fastIterator.Value()
 
 		iter.fastIterator.Next()
+		iter.rwm.RUnlock() // Release read lock
 		return
 	}
 
@@ -199,11 +214,13 @@ func (iter *UnsavedFastIterator) Next() {
 		iter.nextVal = nextUnsavedNode.value
 
 		iter.nextUnsavedNodeIdx++
+		iter.rwm.RUnlock() // Release read lock
 		return
 	}
 
 	iter.nextKey = nil
 	iter.nextVal = nil
+	iter.rwm.RUnlock() // Release read lock
 }
 
 // Close implements dbm.Iterator
